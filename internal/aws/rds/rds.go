@@ -1,14 +1,13 @@
 package rds
 
 import (
+	"context"
 	"encoding/csv"
-	"encoding/json"
 	"fmt"
 	"image/color"
 	"io"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -17,6 +16,14 @@ import (
 
 	"net/http"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
+	cwTypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2Types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	awsRds "github.com/aws/aws-sdk-go-v2/service/rds"
+	rdsTypes "github.com/aws/aws-sdk-go-v2/service/rds/types"
 	"gonum.org/v1/plot"
 	"gonum.org/v1/plot/plotter"
 	"gonum.org/v1/plot/vg"
@@ -26,7 +33,13 @@ import (
 type RDS struct {
 	dbInstanceIdentifier string
 	profile              string
-	//region                                    string
+	awsConfig            aws.Config
+	rdsClient            *awsRds.Client
+	ec2Client            *ec2.Client
+	cloudwatchClient     *cloudwatch.Client
+	ctx                  context.Context
+
+	// Cached data
 	dbInstances                               DescribeDBInstanceResult
 	dbParameterGroups                         DescribeDBParametersResult
 	describeInstanceTypes                     DescribeInstanceTypes
@@ -46,6 +59,25 @@ func (rds *RDS) Init(dbInstanceIdentifier string, profile string) error {
 	var err error
 	rds.dbInstanceIdentifier = dbInstanceIdentifier
 	rds.profile = profile
+	rds.ctx = context.Background()
+
+	// Load AWS configuration with optional profile
+	var cfgOptions []func(*config.LoadOptions) error
+	if profile != "" && profile != "none" {
+		cfgOptions = append(cfgOptions, config.WithSharedConfigProfile(profile))
+	}
+
+	rds.awsConfig, err = config.LoadDefaultConfig(rds.ctx, cfgOptions...)
+	if err != nil {
+		return fmt.Errorf("RDS: failed to load AWS config: %w", err)
+	}
+
+	// Initialize AWS service clients
+	rds.rdsClient = awsRds.NewFromConfig(rds.awsConfig)
+	rds.ec2Client = ec2.NewFromConfig(rds.awsConfig)
+	rds.cloudwatchClient = cloudwatch.NewFromConfig(rds.awsConfig)
+
+	// Fetch initial data
 	rds.dbInstances, err = rds.DescribeDbInstances()
 	if err != nil {
 		return fmt.Errorf("RDS: DescribeDbInstances: %w", err)
@@ -73,26 +105,6 @@ func (rds RDS) GetdbInstance() DBInstance {
 	return rds.dbInstances.DBInstances[0]
 }
 
-func (rds *RDS) Execute(command string, subcommand string, args string) (string, error) {
-	var profileStr = ""
-	if rds.profile != "none" {
-		profileStr = fmt.Sprintf("--profile=%s", rds.profile)
-	}
-
-	cmdStr := fmt.Sprintf("aws %s %s %s %s", profileStr, command, subcommand, args)
-
-	cmd := exec.Command("bash", "-c", cmdStr)
-	// Capturer stdout + stderr ensemble
-	output, err := cmd.CombinedOutput()
-	result := string(output)
-
-	if err != nil {
-		return "", fmt.Errorf("%s: %s %w", cmdStr, result, err)
-	}
-
-	return result, nil
-}
-
 func (rds RDS) GetDBParameters() DescribeDBParametersResult {
 	return rds.dbParameterGroups
 }
@@ -102,25 +114,164 @@ func (rds RDS) GetInstanceType() InstanceType {
 }
 
 func (rds *RDS) DescribeDbInstances() (DescribeDBInstanceResult, error) {
-	str := ""
-	var err error
 	var dbInstances DescribeDBInstanceResult
+
+	input := &awsRds.DescribeDBInstancesInput{}
 	if rds.dbInstanceIdentifier != "" {
-		str, err = rds.Execute("rds", "describe-db-instances", fmt.Sprintf("--db-instance-identifier=%s ", rds.dbInstanceIdentifier))
-		if err != nil {
-			return dbInstances, fmt.Errorf("RDS: Execute: %w", err)
-		}
-	} else {
-		str, err = rds.Execute("rds", "describe-db-instances", "")
-		if err != nil {
-			return dbInstances, fmt.Errorf("RDS: Execute: %w", err)
-		}
+		input.DBInstanceIdentifier = aws.String(rds.dbInstanceIdentifier)
 	}
-	err = json.Unmarshal([]byte(str), &dbInstances)
+
+	result, err := rds.rdsClient.DescribeDBInstances(rds.ctx, input)
 	if err != nil {
-		return dbInstances, fmt.Errorf("json.Unmarshal: %w", err)
+		return dbInstances, fmt.Errorf("RDS: DescribeDBInstances SDK call: %w", err)
 	}
+
+	// Convert AWS SDK types to our internal types
+	dbInstances.DBInstances = make([]DBInstance, len(result.DBInstances))
+	for i, sdkInstance := range result.DBInstances {
+		dbInstances.DBInstances[i] = convertSDKDBInstanceToInternal(sdkInstance)
+	}
+
 	return dbInstances, nil
+}
+
+// Helper function to convert AWS SDK DBInstance to internal DBInstance
+func convertSDKDBInstanceToInternal(sdkInstance rdsTypes.DBInstance) DBInstance {
+	instance := DBInstance{}
+
+	if sdkInstance.DBInstanceIdentifier != nil {
+		instance.DBInstanceIdentifier = *sdkInstance.DBInstanceIdentifier
+	}
+	if sdkInstance.DBInstanceClass != nil {
+		instance.DBInstanceClass = *sdkInstance.DBInstanceClass
+	}
+	if sdkInstance.Engine != nil {
+		instance.Engine = *sdkInstance.Engine
+	}
+	if sdkInstance.DBInstanceStatus != nil {
+		instance.DBInstanceStatus = *sdkInstance.DBInstanceStatus
+	}
+	if sdkInstance.MasterUsername != nil {
+		instance.MasterUsername = *sdkInstance.MasterUsername
+	}
+
+	// Convert Endpoint
+	if sdkInstance.Endpoint != nil {
+		if sdkInstance.Endpoint.Address != nil {
+			instance.Endpoint.Address = *sdkInstance.Endpoint.Address
+		}
+		if sdkInstance.Endpoint.Port != nil {
+			instance.Endpoint.Port = int(*sdkInstance.Endpoint.Port)
+		}
+		if sdkInstance.Endpoint.HostedZoneId != nil {
+			instance.Endpoint.HostedZoneID = *sdkInstance.Endpoint.HostedZoneId
+		}
+	}
+
+	if sdkInstance.AllocatedStorage != nil {
+		instance.AllocatedStorage = int(*sdkInstance.AllocatedStorage)
+	}
+	if sdkInstance.InstanceCreateTime != nil {
+		instance.InstanceCreateTime = *sdkInstance.InstanceCreateTime
+	}
+	if sdkInstance.PreferredBackupWindow != nil {
+		instance.PreferredBackupWindow = *sdkInstance.PreferredBackupWindow
+	}
+	if sdkInstance.BackupRetentionPeriod != nil {
+		instance.BackupRetentionPeriod = int(*sdkInstance.BackupRetentionPeriod)
+	}
+
+	// Convert DBParameterGroups
+	instance.DBParameterGroups = make([]struct {
+		DBParameterGroupName string `json:"DBParameterGroupName"`
+		ParameterApplyStatus string `json:"ParameterApplyStatus"`
+	}, len(sdkInstance.DBParameterGroups))
+	for i, pg := range sdkInstance.DBParameterGroups {
+		if pg.DBParameterGroupName != nil {
+			instance.DBParameterGroups[i].DBParameterGroupName = *pg.DBParameterGroupName
+		}
+		if pg.ParameterApplyStatus != nil {
+			instance.DBParameterGroups[i].ParameterApplyStatus = *pg.ParameterApplyStatus
+		}
+	}
+
+	if sdkInstance.AvailabilityZone != nil {
+		instance.AvailabilityZone = *sdkInstance.AvailabilityZone
+	}
+	if sdkInstance.PreferredMaintenanceWindow != nil {
+		instance.PreferredMaintenanceWindow = *sdkInstance.PreferredMaintenanceWindow
+	}
+	if sdkInstance.LatestRestorableTime != nil {
+		instance.LatestRestorableTime = *sdkInstance.LatestRestorableTime
+	}
+	if sdkInstance.MultiAZ != nil {
+		instance.MultiAZ = *sdkInstance.MultiAZ
+	}
+	if sdkInstance.EngineVersion != nil {
+		instance.EngineVersion = *sdkInstance.EngineVersion
+	}
+	if sdkInstance.AutoMinorVersionUpgrade != nil {
+		instance.AutoMinorVersionUpgrade = *sdkInstance.AutoMinorVersionUpgrade
+	}
+	if sdkInstance.LicenseModel != nil {
+		instance.LicenseModel = *sdkInstance.LicenseModel
+	}
+	if sdkInstance.PubliclyAccessible != nil {
+		instance.PubliclyAccessible = *sdkInstance.PubliclyAccessible
+	}
+	if sdkInstance.StorageType != nil {
+		instance.StorageType = *sdkInstance.StorageType
+	}
+	if sdkInstance.DbInstancePort != nil {
+		instance.DbInstancePort = int(*sdkInstance.DbInstancePort)
+	}
+	if sdkInstance.StorageEncrypted != nil {
+		instance.StorageEncrypted = *sdkInstance.StorageEncrypted
+	}
+	if sdkInstance.DbiResourceId != nil {
+		instance.DbiResourceID = *sdkInstance.DbiResourceId
+	}
+	if sdkInstance.CACertificateIdentifier != nil {
+		instance.CACertificateIdentifier = *sdkInstance.CACertificateIdentifier
+	}
+	if sdkInstance.CopyTagsToSnapshot != nil {
+		instance.CopyTagsToSnapshot = *sdkInstance.CopyTagsToSnapshot
+	}
+	if sdkInstance.MonitoringInterval != nil {
+		instance.MonitoringInterval = int(*sdkInstance.MonitoringInterval)
+	}
+	if sdkInstance.DBInstanceArn != nil {
+		instance.DBInstanceArn = *sdkInstance.DBInstanceArn
+	}
+	if sdkInstance.IAMDatabaseAuthenticationEnabled != nil {
+		instance.IAMDatabaseAuthenticationEnabled = *sdkInstance.IAMDatabaseAuthenticationEnabled
+	}
+	if sdkInstance.PerformanceInsightsEnabled != nil {
+		instance.PerformanceInsightsEnabled = *sdkInstance.PerformanceInsightsEnabled
+	}
+	if sdkInstance.PerformanceInsightsKMSKeyId != nil {
+		instance.PerformanceInsightsKMSKeyID = *sdkInstance.PerformanceInsightsKMSKeyId
+	}
+	if sdkInstance.PerformanceInsightsRetentionPeriod != nil {
+		instance.PerformanceInsightsRetentionPeriod = int(*sdkInstance.PerformanceInsightsRetentionPeriod)
+	}
+	if sdkInstance.DeletionProtection != nil {
+		instance.DeletionProtection = *sdkInstance.DeletionProtection
+	}
+	if sdkInstance.MaxAllocatedStorage != nil {
+		instance.MaxAllocatedStorage = int(*sdkInstance.MaxAllocatedStorage)
+	}
+	if sdkInstance.CustomerOwnedIpEnabled != nil {
+		instance.CustomerOwnedIPEnabled = *sdkInstance.CustomerOwnedIpEnabled
+	}
+	if sdkInstance.ActivityStreamStatus != "" {
+		instance.ActivityStreamStatus = string(sdkInstance.ActivityStreamStatus)
+	}
+	if sdkInstance.BackupTarget != nil {
+		instance.BackupTarget = *sdkInstance.BackupTarget
+	}
+
+	return instance
 }
 
 func (rds *RDS) GenPsql() (string, error) {
@@ -151,33 +302,114 @@ func (rds RDS) GetValidDBInstanceModifications() ValidDBInstanceModificationsMes
 }
 
 func (rds *RDS) GetEC2Information() error {
-	if rds.dbInstanceIdentifier != "" {
+	if rds.dbInstanceIdentifier != "" && len(rds.dbInstances.DBInstances) > 0 {
+		// RDS instance classes have "db." prefix, EC2 instance types don't
 		instanceType := strings.Replace(rds.dbInstances.DBInstances[0].DBInstanceClass, "db.", "", 1)
-		str, err := rds.Execute("ec2", "describe-instance-types", fmt.Sprintf("--instance-types=%s", instanceType))
-		if err != nil {
-			return fmt.Errorf("RDS: Execute: %w", err)
+
+		input := &ec2.DescribeInstanceTypesInput{
+			InstanceTypes: []ec2Types.InstanceType{ec2Types.InstanceType(instanceType)},
 		}
-		err = json.Unmarshal([]byte(str), &rds.describeInstanceTypes)
+
+		result, err := rds.ec2Client.DescribeInstanceTypes(rds.ctx, input)
 		if err != nil {
-			return fmt.Errorf("json.Unmarshal: %w", err)
+			return fmt.Errorf("EC2: DescribeInstanceTypes SDK call: %w", err)
+		}
+
+		if len(result.InstanceTypes) == 0 {
+			return fmt.Errorf("EC2: no instance type found for %s", instanceType)
+		}
+
+		// Convert AWS SDK types to our internal types
+		// Only converting the fields we actually use in the code
+		rds.describeInstanceTypes.InstanceTypes = make([]InstanceType, len(result.InstanceTypes))
+		for i, sdkType := range result.InstanceTypes {
+			it := InstanceType{}
+
+			// Basic fields
+			if sdkType.InstanceType != "" {
+				it.InstanceType = string(sdkType.InstanceType)
+			}
+			if sdkType.CurrentGeneration != nil {
+				it.CurrentGeneration = *sdkType.CurrentGeneration
+			}
+
+			// VCPUInfo - used by GetDefaultVCpus()
+			if sdkType.VCpuInfo != nil {
+				if sdkType.VCpuInfo.DefaultVCpus != nil {
+					it.VCPUInfo.DefaultVCpus = int(*sdkType.VCpuInfo.DefaultVCpus)
+				}
+				if sdkType.VCpuInfo.DefaultCores != nil {
+					it.VCPUInfo.DefaultCores = int(*sdkType.VCpuInfo.DefaultCores)
+				}
+				if sdkType.VCpuInfo.DefaultThreadsPerCore != nil {
+					it.VCPUInfo.DefaultThreadsPerCore = int(*sdkType.VCpuInfo.DefaultThreadsPerCore)
+				}
+			}
+
+			// MemoryInfo - used by GetMemoryInfo() and Free_m()
+			if sdkType.MemoryInfo != nil && sdkType.MemoryInfo.SizeInMiB != nil {
+				it.MemoryInfo.SizeInMiB = int(*sdkType.MemoryInfo.SizeInMiB)
+			}
+
+			rds.describeInstanceTypes.InstanceTypes[i] = it
 		}
 	}
 
 	return nil
 }
 
-// FIXME: J'ai l'impression qu'elle sert à rien cette fonction
 func (rds *RDS) GetDBParameterGroupInformations() error {
-	if rds.dbInstanceIdentifier != "" {
-		// FIXME : Faire un accesseur
-		parameterGroupName := rds.dbInstances.DBInstances[0].DBParameterGroups[0].DBParameterGroupName
-		str, err := rds.Execute("rds", "describe-db-parameters", fmt.Sprintf("--db-parameter-group-name=%s", parameterGroupName))
-		if err != nil {
-			return fmt.Errorf("RDS: Execute: %w", err)
+	if rds.dbInstanceIdentifier != "" && len(rds.dbInstances.DBInstances) > 0 {
+		if len(rds.dbInstances.DBInstances[0].DBParameterGroups) == 0 {
+			return nil
 		}
-		err = json.Unmarshal([]byte(str), &rds.dbParameterGroups)
+
+		parameterGroupName := rds.dbInstances.DBInstances[0].DBParameterGroups[0].DBParameterGroupName
+
+		input := &awsRds.DescribeDBParametersInput{
+			DBParameterGroupName: aws.String(parameterGroupName),
+		}
+
+		result, err := rds.rdsClient.DescribeDBParameters(rds.ctx, input)
 		if err != nil {
-			return fmt.Errorf("json.Unmarshal: %w", err)
+			return fmt.Errorf("RDS: DescribeDBParameters SDK call: %w", err)
+		}
+
+		// Convert AWS SDK types to our internal types
+		rds.dbParameterGroups.Parameters = make([]Parameter, len(result.Parameters))
+		for i, sdkParam := range result.Parameters {
+			param := Parameter{}
+			if sdkParam.ParameterName != nil {
+				param.ParameterName = *sdkParam.ParameterName
+			}
+			if sdkParam.Description != nil {
+				param.Description = *sdkParam.Description
+			}
+			if sdkParam.Source != nil {
+				param.Source = *sdkParam.Source
+			}
+			if sdkParam.ApplyType != nil {
+				param.ApplyType = *sdkParam.ApplyType
+			}
+			if sdkParam.DataType != nil {
+				param.DataType = *sdkParam.DataType
+			}
+			if sdkParam.IsModifiable != nil {
+				param.IsModifiable = *sdkParam.IsModifiable
+			}
+			if sdkParam.ApplyMethod != "" {
+				param.ApplyMethod = string(sdkParam.ApplyMethod)
+			}
+			if sdkParam.ParameterValue != nil {
+				param.ParameterValue = *sdkParam.ParameterValue
+			}
+			if sdkParam.AllowedValues != nil {
+				param.AllowedValues = *sdkParam.AllowedValues
+			}
+			if sdkParam.MinimumEngineVersion != nil {
+				param.MinimumEngineVersion = *sdkParam.MinimumEngineVersion
+			}
+			rds.dbParameterGroups.Parameters[i] = param
 		}
 	}
 
@@ -186,13 +418,90 @@ func (rds *RDS) GetDBParameterGroupInformations() error {
 
 func (rds *RDS) DescribeValidDBInstanceModifications() error {
 	if rds.dbInstanceIdentifier != "" {
-		str, err := rds.Execute("rds", "describe-valid-db-instance-modifications", fmt.Sprintf("--db-instance-identifier=%s ", rds.dbInstanceIdentifier))
-		if err != nil {
-			return fmt.Errorf("RDS: Execute: %w", err)
+		input := &awsRds.DescribeValidDBInstanceModificationsInput{
+			DBInstanceIdentifier: aws.String(rds.dbInstanceIdentifier),
 		}
-		err = json.Unmarshal([]byte(str), &rds.validDBInstanceModificationsMessageResult)
+
+		result, err := rds.rdsClient.DescribeValidDBInstanceModifications(rds.ctx, input)
 		if err != nil {
-			return fmt.Errorf("json.Unmarshal: %w", err)
+			return fmt.Errorf("RDS: DescribeValidDBInstanceModifications SDK call: %w", err)
+		}
+
+		// Convert AWS SDK types to our internal types
+		if result.ValidDBInstanceModificationsMessage != nil {
+			msg := &rds.validDBInstanceModificationsMessageResult.ValidDBInstanceModificationsMessage
+
+			// Convert Storage array
+			if len(result.ValidDBInstanceModificationsMessage.Storage) > 0 {
+				msg.Storage = make([]Storage, len(result.ValidDBInstanceModificationsMessage.Storage))
+				for i, sdkStorage := range result.ValidDBInstanceModificationsMessage.Storage {
+					storage := Storage{}
+					if sdkStorage.StorageType != nil {
+						storage.StorageType = *sdkStorage.StorageType
+					}
+					if sdkStorage.SupportsStorageAutoscaling != nil {
+						storage.SupportsStorageAutoscaling = *sdkStorage.SupportsStorageAutoscaling
+					}
+
+					// Convert StorageSize ranges
+					if len(sdkStorage.StorageSize) > 0 {
+						storage.StorageSize = make([]struct {
+							From int `json:"From"`
+							To   int `json:"To"`
+							Step int `json:"Step"`
+						}, len(sdkStorage.StorageSize))
+						for j, sizeRange := range sdkStorage.StorageSize {
+							if sizeRange.From != nil {
+								storage.StorageSize[j].From = int(*sizeRange.From)
+							}
+							if sizeRange.To != nil {
+								storage.StorageSize[j].To = int(*sizeRange.To)
+							}
+							if sizeRange.Step != nil {
+								storage.StorageSize[j].Step = int(*sizeRange.Step)
+							}
+						}
+					}
+
+					// Convert ProvisionedIops ranges
+					if len(sdkStorage.ProvisionedIops) > 0 {
+						storage.ProvisionedIops = make([]struct {
+							From int `json:"From"`
+							To   int `json:"To"`
+							Step int `json:"Step"`
+						}, len(sdkStorage.ProvisionedIops))
+						for j, iopsRange := range sdkStorage.ProvisionedIops {
+							if iopsRange.From != nil {
+								storage.ProvisionedIops[j].From = int(*iopsRange.From)
+							}
+							if iopsRange.To != nil {
+								storage.ProvisionedIops[j].To = int(*iopsRange.To)
+							}
+							if iopsRange.Step != nil {
+								storage.ProvisionedIops[j].Step = int(*iopsRange.Step)
+							}
+						}
+					}
+
+					// Convert IopsToStorageRatio ranges
+					if len(sdkStorage.IopsToStorageRatio) > 0 {
+						storage.IopsToStorageRatio = make([]struct {
+							From float64 `json:"From"`
+							To   float64 `json:"To"`
+						}, len(sdkStorage.IopsToStorageRatio))
+						for j, ratioRange := range sdkStorage.IopsToStorageRatio {
+							if ratioRange.From != nil {
+								storage.IopsToStorageRatio[j].From = *ratioRange.From
+							}
+							if ratioRange.To != nil {
+								storage.IopsToStorageRatio[j].To = *ratioRange.To
+							}
+						}
+					}
+
+					msg.Storage[i] = storage
+				}
+			}
 		}
 	}
 
