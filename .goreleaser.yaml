@@ -1,0 +1,36 @@
+version: 2
+
+project_name: cloud_helper
+
+builds:
+  - main: ./main.go
+    env:
+      - CGO_ENABLED=0
+      - GOPROXY=direct
+    gcflags:
+      - -trimpath -buildvcs
+    goarch:
+      - amd64
+    goos:
+      - linux
+      - windows
+      - darwin
+
+nfpms:
+  - formats:
+      - deb
+      - rpm
+      - apk
+    maintainer: "Robin PORTIGLIATTI <robin.portigliatti@gmail.com>"
+    description: Helper to get PostgreSQL logs and generate pgbadger from AWS, GCP and Azure
+    vendor: "Robin PORTIGLIATTI"
+    homepage: "https://github.com/robinportigliatti/cloud_helper"
+    license: "PostgreSQL"
+
+
+release:
+  github:
+    owner: robinportigliatti
+    name: cloud_helper
+  prerelease: auto
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json

@@ -1,0 +1,12 @@
+metrics
+logs
+error
+pgbadgers
+jsons
+dist/
+.cache/
+.vscode/
+.claude/
+scripts/
+cloud_helper
+junk.md
