@@ -45,7 +45,7 @@ jobs:
           cache: true
 
       - name: Run GoReleaser (snapshot)
-        uses: goreleaser/goreleaser-action@v5
+        uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
           args: build --clean --snapshot --single-target
