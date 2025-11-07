@@ -1,191 +1,265 @@
-Voici la version entièrement traduite en français, en respectant ta consigne :
+# Summary
 
----
+`cloud_helper` is a CLI tool for managing and monitoring PostgreSQL instances across multiple cloud providers (AWS RDS, Google Cloud SQL, Azure, OVHcloud).
 
-# Résumé
+# Features
 
-`cloud_helper` est un outil vous permettant de récupérer des informations sur vos instances AWS RDS.
+## Generate
 
-# Fonctionnalités
+The `generate` subcommand generates configuration files (`postgresql.conf`, `pg_hba.conf`, `.pgpass`, `audit`, `all`) from templates.
 
-## Génération
-
-La sous-commande `generate` permet de générer un fichier `postgresql.conf`, `pg_hba.conf`, `.pgpass`, `audit`, `all` en fonction d'un `template`.
-
-Utilisation :
+Usage:
 ```sh
 cloud_helper generate [flags]
 ```
 
-Options :
-- `--file` : Fichier à générer (`postgresql.conf`, `pg_hba.conf`, `.pgpass`, `audit`, `all`)
-- `--template` : Template à utiliser pour la génération
-- `--template-name` : Nom du template à utiliser pour la génération (par défaut "audit.md")
+Options:
+- `--file`: File to generate (`postgresql.conf`, `pg_hba.conf`, `.pgpass`, `audit`, `all`)
+- `--template`: Template to use for generation
+- `--template-name`: Template name to use for generation (default "audit.md")
 
-Plus d'infos avec `generate --help`
+More info with `generate --help`
 
 ## Pgbadger
 
-La sous-commande `pgbadger` permet :
+The `pgbadger` subcommand generates pgbadger reports from downloaded logs.
 
-1. De générer un rapport `pgbadger` en fonction de ce qui a été téléchargé par la sous-commande `download`.
-
-Utilisation :
+Usage:
 ```sh
 cloud_helper pgbadger [flags]
 ```
 
-Options :
-- `--input` : Fichiers ou répertoire d'entrée (OBLIGATOIRE)
-- `--log-line-prefix` : Préfixe de ligne de log (par défaut `"%m [%p]: [%l-1] xact=%x,user=%u,db=%d,client=%h, app=%a"`)
-- `--output` : Répertoire de sortie (par défaut `"./pgbadgers"`)
+Options:
+- `--input`: Input files or directory (REQUIRED)
+- `--log-line-prefix`: Log line prefix (default `"%m [%p]: [%l-1] xact=%x,user=%u,db=%d,client=%h, app=%a"`)
+- `--output`: Output directory (default `"./pgbadgers"`)
 
-Plus d'infos avec `pgbadger --help`
+More info with `pgbadger --help`
+
+## Quellog
+
+The `quellog` subcommand provides advanced PostgreSQL log analysis.
+
+Usage:
+```sh
+cloud_helper quellog [flags]
+```
+
+Options:
+- `--input`: Input files or directory (REQUIRED)
+- `--output`: Output directory (empty = stdout)
+- `--summary`: Show summary only
+- `--checkpoints`: Show checkpoints
+- `--connections`: Show connections
+- `--sql-performance`: Show SQL performance
+- `--json`: Export as JSON
+- `--md`: Export as Markdown
+
+More info with `quellog --help`
 
 ## GCP
 
-Interagir avec Google Cloud Project SQL Cloud PostgreSQL.
+Interact with Google Cloud SQL PostgreSQL.
 
-Options globales :
-- `--project-id` : Identifiant du projet Google Cloud
+Global options:
+- `--project-id`: Google Cloud project ID
 
 ### list
 
-Lister toutes les instances dans le projet spécifié.
+List all instances in the specified project.
 
-Utilisation :
+Usage:
 ```sh
 cloud_helper gcp list [flags]
 ```
 
 ### psql
 
-Se connecter à une instance Cloud SQL en utilisant IAM.
+Connect to a Cloud SQL instance using IAM authentication.
 
-Utilisation :
+Usage:
 ```sh
 cloud_helper gcp psql [flags]
 ```
 
-Options :
-- `--dbname` : Nom de la base de données
-- `--host` : Nom de connexion de l'instance (format : `projet:region:instance`)
-- `--iam` : Utiliser l'authentification IAM
-- `--username` : Nom d'utilisateur
+Options:
+- `--dbname`: Database name
+- `--host`: Instance connection name (format: `project:region:instance`)
+- `--iam`: Use IAM authentication
+- `--username`: Username
 
 ## RDS
 
-Interagir avec AWS RDS PostgreSQL.
+Interact with AWS RDS PostgreSQL.
 
-Options globales :
-- `--db-instance-identifier` : Identifiant de l'instance RDS
-- `--list` : Lister toutes les instances RDS
-- `--profile` : Profil AWS à utiliser (par défaut "default")
+Global options:
+- `--db-instance-identifier`: RDS instance identifier
+- `--list`: List all RDS instances
+- `--profile`: AWS profile to use (default "default")
 
 ### download
 
-Télécharger les journaux ou les métriques RDS.
+Download RDS logs or metrics.
 
-Utilisation :
+Usage:
 ```sh
 cloud_helper rds download [flags]
 ```
 
-Options :
-- `--directory` : Répertoire de destination (par défaut `"./"`)
-- `--end` : Date de fin (par défaut `"2025/02/27 17:56:00"`)
-- `--start` : Date de début (par défaut `"2025/02/26 17:56:00"`)
-- `--type` : Type de fichier à télécharger (`logs`, `metrics`) (par défaut `"logs"`)
+Options:
+- `--directory`: Destination directory (default `"./"`)
+- `--end`: End date (default `"2025/02/27 17:56:00"`)
+- `--start`: Start date (default `"2025/02/26 17:56:00"`)
+- `--type`: File type to download (`logs`, `metrics`) (default `"logs"`)
 
 ### psql
 
-Exécuter des sous-commandes ou une requête.
+Execute subcommands or queries.
 
-Utilisation :
+Usage:
 ```sh
 cloud_helper rds psql [flags]
 ```
 
 #### show
 
-Afficher les paramètres PostgreSQL.
+Display PostgreSQL settings.
 
-Utilisation :
+Usage:
 ```sh
 cloud_helper rds psql show [settings...] [flags]
 ```
 
-Options :
-- `-f, --force` : Ne pas demander de confirmation pour récupérer tous les paramètres
-- `-F, --format` : Format de sortie (`default`, `csv`, `json`) (par défaut `"default"`)
+Options:
+- `-f, --force`: Don't ask for confirmation to retrieve all settings
+- `-F, --format`: Output format (`default`, `csv`, `json`) (default `"default"`)
 
 ## Azure
 
-Interagir avec le stockage Azure.
+Interact with Azure Database.
 
-Options globales :
-- `--account-name` : Compte Azure à utiliser (par défaut `"default"`)
+Global options:
+- `--account-name`: Azure account to use (default `"default"`)
 
 ### download
 
-Télécharger des fichiers depuis un conteneur Azure sur une plage de temps définie.
+Download files from an Azure container within a time range.
 
-Utilisation :
+Usage:
 ```sh
 cloud_helper azure download [flags]
 ```
 
-Options :
-- `--begin-time` : Heure de début pour filtrer les fichiers (obligatoire, format : `YYYY-MM-DD HH:MM:SS`)
-- `--container-name` : Nom du conteneur Azure Blob (obligatoire)
-- `--end-time` : Heure de fin pour filtrer les fichiers (obligatoire, format : `YYYY-MM-DD HH:MM:SS`)
+Options:
+- `--begin-time`: Start time to filter files (required, format: `YYYY-MM-DD HH:MM:SS`)
+- `--container-name`: Azure Blob container name (required)
+- `--end-time`: End time to filter files (required, format: `YYYY-MM-DD HH:MM:SS`)
 
-# Démo
+## OVH
 
-## Génération du rapport pgbadger
+Interact with OVHcloud Database PostgreSQL.
+
+Global options:
+- `--service-name`: OVHcloud Public Cloud Service Name (Project ID)
+- `--cluster-id`: OVHcloud Database Cluster ID
+- `--endpoint`: OVHcloud API endpoint (`ovh-eu`, `ovh-ca`, `ovh-us`)
+
+### list
+
+List all PostgreSQL databases.
+
+Usage:
+```sh
+cloud_helper ovh list [flags]
+```
+
+### psql
+
+Connect to an OVHcloud Database instance.
+
+Usage:
+```sh
+cloud_helper ovh psql [flags]
+```
+
+# Examples
+
+## Generate pgbadger report
 
 ```bash
-cloud_helper pgbadger --input=<fichier-ou-répertoire-d'entrée> --log-line-prefix="<préfixe-ligne-log>" --output=<répertoire-de-sortie>
+cloud_helper pgbadger --input=<input-file-or-directory> --log-line-prefix="<log-line-prefix>" --output=<output-directory>
 ```
 
 ## RDS
 
-### Récupération de la liste des instances
+### List instances
 
-Pour le moment, il faut au moins un identifiant d'instance pour récupérer les autres… :
+Currently, you need at least one instance identifier to retrieve others:
 
 ```bash
-cloud_helper rds --profile=<mon-profil> --list
+cloud_helper rds --profile=<my-profile> --list
 ```
 
-### Récupération des journaux
+### Download logs
 
 ```bash
-cloud_helper --profile=<mon-profil> --db-instance-identifier=<mon-id> rds download --type=logs --start="2025/02/10 08:00:00" --end="2025/02/10 09:00:00"
+cloud_helper rds --profile=<my-profile> --db-instance-identifier=<my-id> download --type=logs --start="2025/02/10 08:00:00" --end="2025/02/10 09:00:00"
 ```
 
 ## Azure
 
-### Téléchargement des fichiers d'un conteneur Azure
+### Download files from Azure container
 
 ```bash
-cloud_helper --account-name=<nom-compte> azure download --container-name=<nom-conteneur> --begin-time="2025-02-10 08:00:00" --end-time="2025-02-10 09:00:00"
+cloud_helper azure --account-name=<account-name> download --container-name=<container-name> --begin-time="2025-02-10 08:00:00" --end-time="2025-02-10 09:00:00"
 ```
 
 ## GCP
 
-### Liste des instances dans le projet spécifié
+### List instances in specified project
 
 ```bash
-cloud_helper gcp --project-id=<id-projet> list
+cloud_helper gcp --project-id=<project-id> list
 ```
 
-### Connexion à une instance Cloud SQL
+### Connect to Cloud SQL instance
 
 ```bash
-cloud_helper gcp --project-id=<id-projet> psql --host=<nom-connexion-instance> --dbname=<nom-base-données> --username=<nom-utilisateur>
+cloud_helper gcp --project-id=<project-id> psql --host=<instance-connection-name> --dbname=<database-name> --username=<username>
+```
+
+## OVH
+
+### List databases
+
+```bash
+cloud_helper ovh --service-name=<service-name> list
+```
+
+### Connect to database
+
+```bash
+cloud_helper ovh --service-name=<service-name> --cluster-id=<cluster-id> psql
 ```
 
 # Installation
 
-Récupérer le paquet dans l'une des releases.
+Download the package from one of the [releases](https://github.com/robinportigliatti/cloud_helper/releases).
+
+## From binaries
+
+Download the binary for your platform from the releases page.
+
+## From source
+
+```bash
+git clone https://github.com/robinportigliatti/cloud_helper.git
+cd cloud_helper
+go build .
+```
+
+## Via go install
+
+```bash
+go install github.com/robinportigliatti/cloud_helper@latest
+```
