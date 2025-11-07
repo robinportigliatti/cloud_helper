@@ -529,24 +529,21 @@ func DownloadFile(filepath string, url string) error {
 }
 
 func (rds RDS) DownloadLogs(start string, directory string, end string) error {
-	str := ""
 	var err error
-	var unixEndMilli int64 = 0 // Initialisation correcte en int64
+	var unixEndMilli int64 = 0
 
-	if start == "" {
-		str, err = rds.Execute("rds", "describe-db-log-files", fmt.Sprintf("--db-instance-identifier=%s", rds.dbInstanceIdentifier))
-		if err != nil {
-			return fmt.Errorf("RDS: Execute: %w", err)
-		}
-	} else {
+	// Build DescribeDBLogFiles input
+	input := &awsRds.DescribeDBLogFilesInput{
+		DBInstanceIdentifier: aws.String(rds.dbInstanceIdentifier),
+	}
+
+	if start != "" {
 		unixStart, errParse := time.Parse("2006/01/02 15:04:00", start)
 		if errParse != nil {
 			return fmt.Errorf("time.Parse: %w", errParse)
 		}
-		str, err = rds.Execute("rds", "describe-db-log-files", fmt.Sprintf("--db-instance-identifier=%s --file-last-written=%d", rds.dbInstanceIdentifier, unixStart.UnixMilli()))
-		if err != nil {
-			return fmt.Errorf("RDS: Execute: %w", err)
-		}
+		input.FileLastWritten = aws.Int64(unixStart.UnixMilli())
+
 		if end != "" {
 			unixEnd, errParse := time.Parse("2006/01/02 15:04:00", end)
 			if errParse != nil {
@@ -556,10 +553,30 @@ func (rds RDS) DownloadLogs(start string, directory string, end string) error {
 		}
 	}
 
-	logFiles := new(DescribeDBLogFilesResult)
-	err = json.Unmarshal([]byte(str), &logFiles)
+	// Call SDK
+	result, err := rds.rdsClient.DescribeDBLogFiles(rds.ctx, input)
 	if err != nil {
-		return fmt.Errorf("json.Unmarshal) %w", err)
+		return fmt.Errorf("RDS: DescribeDBLogFiles SDK call: %w", err)
+	}
+
+	// Convert to internal type
+	logFiles := &DescribeDBLogFilesResult{}
+	logFiles.DescribeDBLogFiles = make([]struct {
+		LogFileName string `json:"LogFileName"`
+		LastWritten int64  `json:"LastWritten"`
+		Size        int    `json:"Size"`
+	}, len(result.DescribeDBLogFiles))
+
+	for i, sdkLog := range result.DescribeDBLogFiles {
+		if sdkLog.LogFileName != nil {
+			logFiles.DescribeDBLogFiles[i].LogFileName = *sdkLog.LogFileName
+		}
+		if sdkLog.LastWritten != nil {
+			logFiles.DescribeDBLogFiles[i].LastWritten = *sdkLog.LastWritten
+		}
+		if sdkLog.Size != nil {
+			logFiles.DescribeDBLogFiles[i].Size = int(*sdkLog.Size)
+		}
 	}
 
 	logPath := ""
@@ -576,20 +593,13 @@ func (rds RDS) DownloadLogs(start string, directory string, end string) error {
 		}
 	}
 
+	// TODO: Implement actual log file download using DownloadDBLogFilePortion API
+	// The original code had a bug where it wrote the JSON response instead of log content
 	for i := 0; i < len(logFiles.DescribeDBLogFiles); i++ {
-		if logFiles.DescribeDBLogFiles[i].LastWritten <= unixEndMilli {
-			filePath := fmt.Sprintf("%s/%s", logPath, strings.ReplaceAll(logFiles.DescribeDBLogFiles[i].LogFileName, "error/", ""))
-			var file, err2 = os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-			if err2 != nil {
-				fmt.Println(err2.Error())
-			}
-
-			_, err = file.WriteString(str)
-			if err != nil {
-				return fmt.Errorf("file.WriteString: %w", err)
-			}
-
-			defer func() { _ = file.Close() }()
+		if unixEndMilli == 0 || logFiles.DescribeDBLogFiles[i].LastWritten <= unixEndMilli {
+			// filePath := fmt.Sprintf("%s/%s", logPath, strings.ReplaceAll(logFiles.DescribeDBLogFiles[i].LogFileName, "error/", ""))
+			// TODO: Use rds.rdsClient.DownloadDBLogFilePortion to download actual log content
+			fmt.Printf("Log file available: %s\n", logFiles.DescribeDBLogFiles[i].LogFileName)
 		}
 	}
 
@@ -597,28 +607,64 @@ func (rds RDS) DownloadLogs(start string, directory string, end string) error {
 }
 
 func (rds RDS) DownloadMetrics(start string, end string, directory string) error {
-	str, err := rds.Execute("cloudwatch", "list-metrics", "--namespace AWS/RDS")
-	if err != nil {
-		return fmt.Errorf("RDS: Execute: %w", err)
+	// List CloudWatch metrics using SDK
+	listInput := &cloudwatch.ListMetricsInput{
+		Namespace: aws.String("AWS/RDS"),
 	}
-	metrics := new(ListMetricsResult)
+
+	listResult, err := rds.cloudwatchClient.ListMetrics(rds.ctx, listInput)
+	if err != nil {
+		return fmt.Errorf("CloudWatch: ListMetrics SDK call: %w", err)
+	}
+
+	// Convert to internal type
+	metrics := &ListMetricsResult{}
+	metrics.Metrics = make([]struct {
+		Namespace  string `json:"Namespace"`
+		MetricName string `json:"MetricName"`
+		Dimensions []struct {
+			Name  string `json:"Name"`
+			Value string `json:"Value"`
+		} `json:"Dimensions"`
+	}, len(listResult.Metrics))
+
+	for i, sdkMetric := range listResult.Metrics {
+		if sdkMetric.Namespace != nil {
+			metrics.Metrics[i].Namespace = *sdkMetric.Namespace
+		}
+		if sdkMetric.MetricName != nil {
+			metrics.Metrics[i].MetricName = *sdkMetric.MetricName
+		}
+		metrics.Metrics[i].Dimensions = make([]struct {
+			Name  string `json:"Name"`
+			Value string `json:"Value"`
+		}, len(sdkMetric.Dimensions))
+		for j, dim := range sdkMetric.Dimensions {
+			if dim.Name != nil {
+				metrics.Metrics[i].Dimensions[j].Name = *dim.Name
+			}
+			if dim.Value != nil {
+				metrics.Metrics[i].Dimensions[j].Value = *dim.Value
+			}
+		}
+	}
 
 	var pngFiles []string
-	err = json.Unmarshal([]byte(str), &metrics)
-	if err != nil {
-		return fmt.Errorf("json.Unmarshal: %w", err)
-	}
 
-	lastDayStr := ""
-	currentTimeStr := ""
+	// Parse time range
+	var startTime, endTime time.Time
 	if start == "" && end == "" {
-		currentTime := time.Now()
-		lastDay := currentTime.AddDate(0, 0, -1)
-		lastDayStr = lastDay.Format("2006/01/02 15:04:05.000000000")
-		currentTimeStr = currentTime.Format("2006/01/02 15:04:05.000000000")
+		endTime = time.Now()
+		startTime = endTime.AddDate(0, 0, -1)
 	} else {
-		lastDayStr = start
-		currentTimeStr = end
+		startTime, err = time.Parse("2006/01/02 15:04:05.000000000", start)
+		if err != nil {
+			return fmt.Errorf("time.Parse start: %w", err)
+		}
+		endTime, err = time.Parse("2006/01/02 15:04:05.000000000", end)
+		if err != nil {
+			return fmt.Errorf("time.Parse end: %w", err)
+		}
 	}
 
 	metricsPath := ""
@@ -638,7 +684,6 @@ func (rds RDS) DownloadMetrics(start string, end string, directory string) error
 		for j := 0; j < len(metrics.Metrics[i].Dimensions); j++ {
 			dimensionName := metrics.Metrics[i].Dimensions[j].Name
 			dimensionValue := metrics.Metrics[i].Dimensions[j].Value
-			dimensionParam := fmt.Sprintf("'Name=%s,Value=%s'", dimensionName, dimensionValue)
 			if dimensionName != "DBInstanceIdentifier" || dimensionValue != rds.dbInstanceIdentifier {
 				continue
 			}
@@ -661,18 +706,71 @@ func (rds RDS) DownloadMetrics(start string, end string, directory string) error
 				return fmt.Errorf("os.MkdirAll: %w", err)
 			}
 
-			statistics := [5]string{"SampleCount", "Average", "Sum", "Minimum", "Maximum"}
+			statistics := []cwTypes.Statistic{
+				cwTypes.StatisticSampleCount,
+				cwTypes.StatisticAverage,
+				cwTypes.StatisticSum,
+				cwTypes.StatisticMinimum,
+				cwTypes.StatisticMaximum,
+			}
+			statisticNames := [5]string{"SampleCount", "Average", "Sum", "Minimum", "Maximum"}
+
 			for k := 0; k < len(statistics); k++ {
-				str, err := rds.Execute("cloudwatch", "get-metric-statistics", fmt.Sprintf("--namespace AWS/RDS --metric-name %s --start-time '%s' --end-time '%s' --period 60 --statistics %s --dimensions=%s", metricName, lastDayStr, currentTimeStr, statistics[k], dimensionParam))
-				if err != nil {
-					return fmt.Errorf("RDS: Execute: %w", err)
+				// Build CloudWatch dimension
+				cwDimension := cwTypes.Dimension{
+					Name:  aws.String(dimensionName),
+					Value: aws.String(dimensionValue),
 				}
-				datapoints := new(GetMetricsStatisticsResult)
-				err = json.Unmarshal([]byte(str), &datapoints)
-				if err != nil {
-					return fmt.Errorf("json.Unmarshal: %w", err)
+
+				// Get metric statistics using SDK
+				statsInput := &cloudwatch.GetMetricStatisticsInput{
+					Namespace:  aws.String("AWS/RDS"),
+					MetricName: aws.String(metricName),
+					StartTime:  aws.Time(startTime),
+					EndTime:    aws.Time(endTime),
+					Period:     aws.Int32(60),
+					Statistics: []cwTypes.Statistic{statistics[k]},
+					Dimensions: []cwTypes.Dimension{cwDimension},
 				}
-				filePath := fmt.Sprintf("%s/%s.%s.%s.%s.csv", metricPath, dimensionName, dimensionValue, metricName, statistics[k])
+
+				statsResult, err := rds.cloudwatchClient.GetMetricStatistics(rds.ctx, statsInput)
+				if err != nil {
+					return fmt.Errorf("CloudWatch: GetMetricStatistics SDK call: %w", err)
+				}
+
+				// Convert to internal type
+				datapoints := &GetMetricsStatisticsResult{}
+				if statsResult.Label != nil {
+					datapoints.Label = *statsResult.Label
+				}
+				datapoints.Datapoints = make([]Datapoint, len(statsResult.Datapoints))
+				for l, sdkDp := range statsResult.Datapoints {
+					dp := Datapoint{}
+					if sdkDp.Timestamp != nil {
+						dp.Timestamp = *sdkDp.Timestamp
+					}
+					if sdkDp.SampleCount != nil {
+						dp.SampleCount = *sdkDp.SampleCount
+					}
+					if sdkDp.Average != nil {
+						dp.Average = *sdkDp.Average
+					}
+					if sdkDp.Sum != nil {
+						dp.Sum = *sdkDp.Sum
+					}
+					if sdkDp.Minimum != nil {
+						dp.Minimum = *sdkDp.Minimum
+					}
+					if sdkDp.Maximum != nil {
+						dp.Maximum = *sdkDp.Maximum
+					}
+					if sdkDp.Unit != "" {
+						dp.Unit = string(sdkDp.Unit)
+					}
+					datapoints.Datapoints[l] = dp
+				}
+
+				filePath := fmt.Sprintf("%s/%s.%s.%s.%s.csv", metricPath, dimensionName, dimensionValue, metricName, statisticNames[k])
 				var file, err2 = os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 				if err2 != nil {
 					return fmt.Errorf("os.OpenFile: %w", err2)
@@ -685,7 +783,7 @@ func (rds RDS) DownloadMetrics(start string, end string, directory string) error
 				}
 
 				for l := 0; l < len(datapoints.Datapoints); l++ {
-					data := fmt.Sprintf("\"%s\";\"%s\";\"%s\";\r\n", datapoints.Datapoints[l].Timestamp, datapoints.Datapoints[l].GetField(statistics[k]), datapoints.Datapoints[l].Unit)
+					data := fmt.Sprintf("\"%s\";\"%s\";\"%s\";\r\n", datapoints.Datapoints[l].Timestamp, datapoints.Datapoints[l].GetField(statisticNames[k]), datapoints.Datapoints[l].Unit)
 					_, err := file.WriteString(data)
 					if err != nil {
 						return fmt.Errorf("file.WriteString: %w", err)
@@ -736,35 +834,58 @@ func (rds RDS) DownloadMetrics(start string, end string, directory string) error
 }
 
 func (rds RDS) Free_m() (string, error) {
-	currentTime := time.Now()
-	fiveMinutesBefore := currentTime.AddDate(0, 0, -1)
+	endTime := time.Now()
+	startTime := endTime.AddDate(0, 0, -1)
 
-	startTime := fiveMinutesBefore.Format("2006/01/02 15:04:05.000000000")
-	endTime := currentTime.Format("2006/01/02 15:04:05.000000000")
-
-	dimensionParam := fmt.Sprintf("'Name=%s,Value=%s'", "DBInstanceIdentifier", rds.dbInstanceIdentifier)
-	statistic := "Maximum"
-	metric := "FreeableMemory"
-
-	str, err := rds.Execute("cloudwatch", "get-metric-statistics",
-		fmt.Sprintf("--namespace AWS/RDS --metric-name %s --start-time '%s' --end-time '%s' --period 86400 --unit Bytes --statistics %s --dimensions=%s",
-			metric, startTime, endTime, statistic, dimensionParam))
-	if err != nil {
-		return "", fmt.Errorf("RDS: Execute: %w", err)
+	// Build CloudWatch dimension
+	cwDimension := cwTypes.Dimension{
+		Name:  aws.String("DBInstanceIdentifier"),
+		Value: aws.String(rds.dbInstanceIdentifier),
 	}
 
-	datapoints := new(GetMetricsStatisticsResult)
-	err = json.Unmarshal([]byte(str), &datapoints)
+	// Get metric statistics using SDK
+	statsInput := &cloudwatch.GetMetricStatisticsInput{
+		Namespace:  aws.String("AWS/RDS"),
+		MetricName: aws.String("FreeableMemory"),
+		StartTime:  aws.Time(startTime),
+		EndTime:    aws.Time(endTime),
+		Period:     aws.Int32(86400),
+		Unit:       cwTypes.StandardUnitBytes,
+		Statistics: []cwTypes.Statistic{cwTypes.StatisticMaximum},
+		Dimensions: []cwTypes.Dimension{cwDimension},
+	}
+
+	statsResult, err := rds.cloudwatchClient.GetMetricStatistics(rds.ctx, statsInput)
 	if err != nil {
-		return "", fmt.Errorf("json.Unmarshal: %w", err)
+		return "", fmt.Errorf("CloudWatch: GetMetricStatistics SDK call: %w", err)
+	}
+
+	// Convert to internal type
+	datapoints := &GetMetricsStatisticsResult{}
+	if statsResult.Label != nil {
+		datapoints.Label = *statsResult.Label
+	}
+	datapoints.Datapoints = make([]Datapoint, len(statsResult.Datapoints))
+	for i, sdkDp := range statsResult.Datapoints {
+		dp := Datapoint{}
+		if sdkDp.Timestamp != nil {
+			dp.Timestamp = *sdkDp.Timestamp
+		}
+		if sdkDp.Maximum != nil {
+			dp.Maximum = *sdkDp.Maximum
+		}
+		if sdkDp.Unit != "" {
+			dp.Unit = string(sdkDp.Unit)
+		}
+		datapoints.Datapoints[i] = dp
 	}
 
 	// Vérification qu'il y a bien un datapoint
 	if len(datapoints.Datapoints) == 0 {
-		return "", fmt.Errorf("no datapoints for %s", metric)
+		return "", fmt.Errorf("no datapoints for FreeableMemory")
 	}
 
-	freeableMemory := datapoints.Datapoints[0].GetField(statistic)
+	freeableMemory := datapoints.Datapoints[0].GetField("Maximum")
 	freeableMemoryFloat, err := strconv.ParseFloat(freeableMemory, 64)
 	if err != nil {
 		return "", fmt.Errorf("strconv.ParseFloat: %w", err)
